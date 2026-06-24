@@ -1,6 +1,16 @@
 import cv2
 import yt_dlp
 import numpy as np
+import re
+
+def clean_youtube_url(url: str) -> str:
+    """Normalizes YouTube URLs to standard watch format and strips timestamps or tracking parameters."""
+    pattern = r'(?:https?://)?(?:www\.)?(?:youtube\.com/(?:watch\?v=|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})'
+    match = re.search(pattern, url)
+    if match:
+        video_id = match.group(1)
+        return f"https://www.youtube.com/watch?v={video_id}"
+    return url
 
 def get_middle_frame(youtube_url: str) -> np.ndarray:
     """
@@ -17,6 +27,8 @@ def get_middle_frame(youtube_url: str) -> np.ndarray:
         ValueError: If video URL extraction fails, video stream cannot be opened,
                     or middle frame cannot be read.
     """
+    cleaned_url = clean_youtube_url(youtube_url)
+    
     ydl_opts = {
         'format': 'bestvideo[ext=mp4]/best[ext=mp4]/best',  # Prefer mp4 for OpenCV compatibility
         'quiet': True,
@@ -25,7 +37,7 @@ def get_middle_frame(youtube_url: str) -> np.ndarray:
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(youtube_url, download=False)
+            info_dict = ydl.extract_info(cleaned_url, download=False)
             
             # Determine the stream URL
             video_url = None
