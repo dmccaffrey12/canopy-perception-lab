@@ -1,6 +1,6 @@
 streamlit
 yt-dlp
-opencv-python
+opencv-python-headless
 ultralytics
 pillow
 python-dotenv
