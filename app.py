@@ -88,7 +88,10 @@ if youtube_url:
     try:
         # Frame extraction
         with st.spinner("Extracting stream middle frame..."):
-            pristine_frame = get_middle_frame(youtube_url)
+            pristine_frame, is_fallback = get_middle_frame(youtube_url)
+            
+        if is_fallback:
+            st.warning("⚠️ YouTube blocked direct video downloading from this cloud server (HTTP 403). Falling back to the video's high-resolution thumbnail for evaluation. Run the app locally for exact middle-frame extraction.")
             
         # Running Inference on Ground Truth
         with st.spinner("Establishing Ground Truth (Pristine Frame)..."):
