@@ -1,0 +1,6 @@
+streamlit
+yt-dlp
+opencv-python
+ultralytics
+pillow
+python-dotenv
