@@ -5,6 +5,7 @@ import re
 import os
 import tempfile
 import uuid
+import urllib.request
 
 def clean_youtube_url(url: str) -> str:
     """Normalizes YouTube URLs to standard watch format and strips timestamps or tracking parameters."""
@@ -17,8 +18,6 @@ def clean_youtube_url(url: str) -> str:
 
 def get_youtube_thumbnail(video_id: str) -> np.ndarray:
     """Downloads the highest resolution thumbnail available for the video."""
-    import urllib.request
-    
     urls = [
         f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
         f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
@@ -42,87 +41,103 @@ def get_youtube_thumbnail(video_id: str) -> np.ndarray:
             
     raise ValueError("Could not retrieve any video thumbnail.")
 
-def get_middle_frame(youtube_url: str) -> tuple[np.ndarray, bool]:
+def get_frame(source, frame_pct: float = 0.5) -> tuple[np.ndarray, bool]:
     """
-    Downloads a low-resolution version of the YouTube video to a temporary file
-    using yt-dlp, seeks to the exact middle, and captures that single frame.
-    
-    If YouTube blocks the request (HTTP 403, common on cloud platforms like Streamlit Cloud),
-    it falls back to downloading the video's static high-resolution thumbnail.
+    Ingests video from YouTube, direct URLs, or uploaded file buffers,
+    and extracts a frame at the specified percentage through the video (0.0 to 1.0).
     
     Returns:
-        tuple[np.ndarray, bool]: (image_matrix_rgb, is_fallback_thumbnail)
+        tuple[np.ndarray, bool]: (frame_rgb, is_fallback_thumbnail)
     """
-    cleaned_url = clean_youtube_url(youtube_url)
-    
-    # Extract video ID for thumbnail fallback
-    pattern = r'v=([a-zA-Z0-9_-]{11})'
-    match = re.search(pattern, cleaned_url)
-    video_id = match.group(1) if match else None
-    
-    # Create a unique temporary file path
+    # Create unique temp file path
     temp_dir = tempfile.gettempdir()
     temp_filename = f"canopy_temp_{uuid.uuid4().hex}.mp4"
     temp_filepath = os.path.join(temp_dir, temp_filename)
     
-    ydl_opts = {
-        'format': 'worstvideo[ext=mp4]/18/worst[ext=mp4]/worst',
-        'outtmpl': temp_filepath,
-        'quiet': True,
-        'no_warnings': True,
-    }
+    is_youtube = False
+    video_id = None
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([cleaned_url])
+        # Case 1: Uploaded file buffer (BytesIO / Streamlit UploadedFile)
+        if hasattr(source, 'read'):
+            source.seek(0)
+            with open(temp_filepath, 'wb') as f:
+                f.write(source.read())
+                
+        # Case 2: URL (string)
+        elif isinstance(source, str) and source.startswith(('http://', 'https://')):
+            cleaned_url = clean_youtube_url(source)
+            if "youtube.com" in cleaned_url or "youtu.be" in cleaned_url:
+                is_youtube = True
+                pattern = r'v=([a-zA-Z0-9_-]{11})'
+                match = re.search(pattern, cleaned_url)
+                video_id = match.group(1) if match else None
+                
+                # Try downloading via yt-dlp
+                ydl_opts = {
+                    'format': 'worstvideo[ext=mp4]/18/worst[ext=mp4]/worst',
+                    'outtmpl': temp_filepath,
+                    'quiet': True,
+                    'no_warnings': True,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([cleaned_url])
+            else:
+                # Direct MP4 / Video URL
+                req = urllib.request.Request(
+                    source, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                )
+                with urllib.request.urlopen(req) as response:
+                    with open(temp_filepath, 'wb') as f:
+                        f.write(response.read())
+        else:
+            raise ValueError("Unsupported video source type.")
             
-        # Open the downloaded file using OpenCV
+        # Open and extract the frame
         cap = cv2.VideoCapture(temp_filepath)
         if not cap.isOpened():
-            raise ValueError("Could not open video file.")
+            raise ValueError("Could not open the video file.")
             
         try:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if total_frames > 0:
-                middle_frame_idx = total_frames // 2
-                cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame_idx)
+                target_frame = int(total_frames * frame_pct)
+                target_frame = min(max(0, target_frame), total_frames - 1)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                
                 ret, frame = cap.read()
                 if not ret:
+                    # Fallback to first frame
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ret, frame = cap.read()
             else:
                 ret, frame = cap.read()
                 
             if not ret or frame is None:
-                raise ValueError("Could not read frame.")
+                raise ValueError("Could not read frame from video.")
                 
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             return frame_rgb, False
             
         finally:
             cap.release()
-            if os.path.exists(temp_filepath):
-                try:
-                    os.remove(temp_filepath)
-                except Exception:
-                    pass
-                    
+            
     except Exception as e:
-        # Clean up temp file if it exists
+        # If it's a YouTube link and failed, try fallback to thumbnail
+        if is_youtube and video_id:
+            try:
+                thumbnail = get_youtube_thumbnail(video_id)
+                return thumbnail, True
+            except Exception as thumb_err:
+                raise ValueError(f"Failed to load YouTube stream and thumbnail fallback failed. Details: {e} | Thumbnail Error: {thumb_err}")
+        else:
+            raise ValueError(f"Failed to process video source. Details: {e}")
+            
+    finally:
+        # Clean up temp file
         if os.path.exists(temp_filepath):
             try:
                 os.remove(temp_filepath)
             except Exception:
                 pass
-                
-        # If video download fails (e.g. 403), try downloading the static thumbnail
-        if video_id:
-            try:
-                thumbnail = get_youtube_thumbnail(video_id)
-                return thumbnail, True
-            except Exception as thumb_err:
-                raise ValueError(f"Failed to extract frame and thumbnail fallback failed. Details: {e} | Thumbnail Error: {thumb_err}")
-        else:
-            raise ValueError(f"Failed to download video stream and could not determine video ID for thumbnail. Details: {e}")
-
-
