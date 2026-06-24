@@ -2,6 +2,9 @@ import cv2
 import yt_dlp
 import numpy as np
 import re
+import os
+import tempfile
+import uuid
 
 def clean_youtube_url(url: str) -> str:
     """Normalizes YouTube URLs to standard watch format and strips timestamps or tracking parameters."""
@@ -14,58 +17,46 @@ def clean_youtube_url(url: str) -> str:
 
 def get_middle_frame(youtube_url: str) -> np.ndarray:
     """
-    Extracts the stream link via yt-dlp, seeks to the exact middle of the 
-    video stream, and captures that single frame as a clean NumPy BGR matrix.
+    Downloads a low-resolution version of the YouTube video to a temporary file
+    using yt-dlp, seeks to the exact middle, and captures that single frame.
     
-    Args:
-        youtube_url (str): The URL of the YouTube video.
-        
-    Returns:
-        np.ndarray: The middle frame in RGB format.
-        
-    Raises:
-        ValueError: If video URL extraction fails, video stream cannot be opened,
-                    or middle frame cannot be read.
+    This avoids HTTP 403 blocking issues that occur when streaming directly
+    from cloud environments like Streamlit Cloud.
     """
     cleaned_url = clean_youtube_url(youtube_url)
     
+    # Create a unique temporary file path
+    temp_dir = tempfile.gettempdir()
+    temp_filename = f"canopy_temp_{uuid.uuid4().hex}.mp4"
+    temp_filepath = os.path.join(temp_dir, temp_filename)
+    
+    # We prioritize low-resolution video-only format to minimize download size and time
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]/best[ext=mp4]/best',  # Prefer mp4 for OpenCV compatibility
+        'format': 'worstvideo[ext=mp4]/18/worst[ext=mp4]/worst',
+        'outtmpl': temp_filepath,
         'quiet': True,
         'no_warnings': True,
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info_dict = ydl.extract_info(cleaned_url, download=False)
-            
-            # Determine the stream URL
-            video_url = None
-            if 'url' in info_dict:
-                video_url = info_dict['url']
-            elif 'formats' in info_dict and len(info_dict['formats']) > 0:
-                # Fallback to the best format URL
-                formats = info_dict['formats']
-                # Search for video-only or combined video formats
-                video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('url')]
-                if video_formats:
-                    video_url = video_formats[-1]['url']
-                else:
-                    video_url = formats[-1]['url']
-                    
-            if not video_url:
-                raise ValueError("Could not extract a valid video stream URL.")
-                
+            ydl.download([cleaned_url])
     except yt_dlp.utils.DownloadError as e:
-        raise ValueError(f"Failed to retrieve video metadata. The URL might be invalid, private, or geo-blocked. Details: {e}")
+        raise ValueError(f"Failed to download video. The URL might be private, geo-blocked, or invalid. Details: {e}")
     except Exception as e:
-        raise ValueError(f"An unexpected error occurred while parsing the YouTube URL: {e}")
+        raise ValueError(f"An unexpected error occurred during video download: {e}")
         
-    # Open the video stream with OpenCV
-    cap = cv2.VideoCapture(video_url)
+    # Open the downloaded file using OpenCV
+    cap = cv2.VideoCapture(temp_filepath)
     
     if not cap.isOpened():
-        raise ValueError("Could not open the video stream. The streaming URL might have expired or is blocked.")
+        # Cleanup file before raising error
+        if os.path.exists(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except Exception:
+                pass
+        raise ValueError("Could not open the downloaded video file. The file format might be incompatible.")
         
     try:
         # Get total frames to find the middle one
@@ -75,22 +66,27 @@ def get_middle_frame(youtube_url: str) -> np.ndarray:
             middle_frame_idx = total_frames // 2
             cap.set(cv2.CAP_PROP_POS_FRAMES, middle_frame_idx)
             
-            # Verify position set correctly (sometimes remote streams don't support arbitrary seeking)
             ret, frame = cap.read()
             if not ret:
-                # If seeking failed, try resetting and reading the first available frame
+                # Fallback to first frame if seeking failed
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 ret, frame = cap.read()
         else:
-            # Fallback if frame count is unavailable: read the first frame
             ret, frame = cap.read()
             
         if not ret or frame is None:
-            raise ValueError("Could not read frame from the video stream.")
+            raise ValueError("Could not read frame from the video file.")
             
-        # Convert BGR (OpenCV default) to RGB (standard for PIL/Streamlit/YOLO)
+        # Convert BGR (OpenCV) to RGB
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame_rgb
         
     finally:
         cap.release()
+        # Clean up the temporary file
+        if os.path.exists(temp_filepath):
+            try:
+                os.remove(temp_filepath)
+            except Exception:
+                pass
+
